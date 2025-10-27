@@ -1,5 +1,3 @@
-# news_sources.yaml (공식 RSS만 수집: 국내 5대, 미국 주요, 정부 보도자료)
-
 domestic:
   chosun: "https://www.chosun.com/arc/outboundfeeds/rss/?outputType=xml"
   donga: "https://www.donga.com/news/List/Economy/rss"
@@ -13,7 +11,7 @@ us_major:
   reuters_markets: "https://feeds.reuters.com/reuters/marketsNews"
 
 gov_kr:
-  moef: "https://www.moef.go.kr/npf/rss/rssList.do"               # 기획재정부
-  fsc:  "https://www.fsc.go.kr/rss/01000000"                       # 금융위원회
-  motie:"https://www.motie.go.kr/rss/press2.xml"                   # 산업통상자원부
-  msit: "https://www.msit.go.kr/web/msipContents/rssRssd.do?mId=99" # 과기정통부
+  moef: "https://www.moef.go.kr/npf/rss/rssList.do"
+  fsc: "https://www.fsc.go.kr/rss/01000000"
+  motie: "https://www.motie.go.kr/rss/press2.xml"
+  msit: "https://www.msit.go.kr/web/msipContents/rssRssd.do?mId=99"
