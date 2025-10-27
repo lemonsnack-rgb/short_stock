@@ -1,4 +1,4 @@
-# bot.py (단타용: 뉴스/테마 반영 + 한글 헤드라인 + 근거 문장 + 모바일 메시지)
+# bot.py (단타용: 테마 확장 + direct/related 가점 + 한글 헤드라인 + 근거 + 모바일 메시지)
 # -*- coding: utf-8 -*-
 
 import os, json, sys, traceback
@@ -12,7 +12,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from gspread.exceptions import WorksheetNotFound, SpreadsheetNotFound, APIError
 
-# 뉴스/테마 엔진
 from news_engine import (
     collect_news,
     map_theme_to_tickers,
@@ -20,7 +19,7 @@ from news_engine import (
     build_ticker_reasons,
 )
 
-# ===== 환경값(기본값은 요청사항 반영) =====
+# ===== ENV 기본값 (요구사항 반영) =====
 SHEET_ID_OR_URL = os.getenv("SHEET_ID", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -49,8 +48,7 @@ TOP10_HEADERS = [
 ]
 POSITIONS_HEADERS = ["ticker","name","qty","avg_cost","note"]
 
-
-# ===== 공용 유틸 =====
+# ===== 유틸 =====
 def log(msg: str):
     print(msg, flush=True)
 
@@ -69,24 +67,16 @@ def _fmt_won(x) -> str:
         return str(x)
 
 def _name_map_from_rows(rows: list[dict]) -> dict[str, str]:
-    mp = {}
-    for r in rows:
-        mp[str(r["ticker"])] = str(r["name"])
-    return mp
+    return {str(r["ticker"]): str(r["name"]) for r in rows}
 
 def make_top10_mobile_message(out: pd.DataFrame, ref_date: date, target_pct: float, reasons: dict[str, list[str]] | None = None) -> str:
-    """모바일에서 보기 좋은 카드형 리스트 메시지 (한글/목표가/근거 1줄 포함)"""
+    """모바일 카드: 한글, 목표가, 그리고 종목별 뉴스 근거 1줄"""
     header = f"📊 KOSPI 단타 후보 Top10 ( {ref_date.strftime('%Y-%m-%d')} )"
     lines = [header, ""]
     for _, r in out.iterrows():
-        rank = int(r["rank"])
-        name = str(r["name"])
-        ticker = str(r["ticker"])
-        close = _fmt_won(r["close"])
-        buy_atr = str(r["buy_atr"])
-        sell_atr = str(r["sell_atr"])
-        stop = _fmt_won(r["stop"])
-        tgt = _fmt_won(r["target_3pct"])
+        rank = int(r["rank"]); name = str(r["name"]); ticker = str(r["ticker"])
+        close = _fmt_won(r["close"]); buy_atr = str(r["buy_atr"]); sell_atr = str(r["sell_atr"])
+        stop = _fmt_won(r["stop"]); tgt = _fmt_won(r["target_3pct"])
         lines.append(f"{_rank_emoji(rank)} {name} ({close})")
         if reasons and reasons.get(ticker):
             lines.append(f"근거: {reasons[ticker][0]}")
@@ -115,7 +105,6 @@ def send_telegram(text: str):
     except Exception as e:
         log(f"[ERROR] Telegram 예외: {e}")
         raise
-
 
 # ===== Google Sheets =====
 def sheet_client():
@@ -162,7 +151,6 @@ def ensure_worksheet(sh, title, headers):
         if headers:
             ws.update([headers])
         return ws
-
 
 # ===== 데이터/전략 =====
 def yesterday_trading_date():
@@ -253,7 +241,6 @@ def calc_levels(tkr: str, ref_date: date):
         "target_3pct": target_price
     }
 
-
 # ===== 시트 업데이트 & 알림 =====
 def write_universe_and_top10(rows: list, ref: date, news: dict, name_map: dict[str, str], reasons: dict[str, list[str]]):
     log("[STEP] Google Sheets 연결 시작")
@@ -278,7 +265,7 @@ def write_universe_and_top10(rows: list, ref: date, news: dict, name_map: dict[s
     top_ws.clear()
     top_ws.update([out.columns.tolist()] + out.values.tolist())
 
-    # 뉴스 헤더(한글 변환 + 영향 종목 "종목명") + 후보 카드(근거 1줄)
+    # 뉴스 헤더(한글 변환 + 영향 종목 "종목명") + 후보 카드(근거 1줄, 매수/목표/손절)
     news_header = format_news_header(news, name_map=name_map)
     msg = news_header + "\n\n" + make_top10_mobile_message(out, ref, DAY_TARGET_PCT, reasons=reasons)
     send_telegram(msg)
@@ -334,7 +321,6 @@ def check_positions_and_alert(ref: date):
 
     log("[STEP] positions 체크 완료")
 
-
 # ===== 메인 =====
 def main():
     try:
@@ -357,13 +343,13 @@ def main():
             raise RuntimeError("레벨 계산 결과가 비었습니다.")
 
         # === 뉴스/테마 수집 및 가점 ===
-        news = collect_news(ref)                      # 기사별 영향 테마/티커 포함
+        news = collect_news(ref)                      # 기사별 영향 테마/티커 포함(direct+related)
         ticker_boost = map_theme_to_tickers(news["theme_score"])
         for r in rows:
             b = ticker_boost.get(r["ticker"], 0.0)
             if b > 0:
-                # 보수적 가점 (상한 0.4)
-                r["score"] = round(float(r["score"]) + min(0.4, 0.2 * (b ** 0.5)), 4)
+                # 뉴스 가점: direct/related 합산 점수에 루트 스케일, 상한 0.5로 확대
+                r["score"] = round(float(r["score"]) + min(0.5, 0.25 * (b ** 0.5)), 4)
 
         # 종목코드→이름 맵 + 종목별 '근거' 생성
         name_map = _name_map_from_rows(rows)
@@ -382,7 +368,6 @@ def main():
         except Exception:
             pass
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
