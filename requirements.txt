@@ -1,0 +1,9 @@
+pykrx
+pandas
+numpy
+requests
+gspread
+oauth2client
+feedparser
+python-dateutil
+PyYAML
