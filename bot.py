@@ -1,4 +1,4 @@
-# bot.py (단타용: 뉴스/테마 반영 + 모바일 친화 메시지)
+# bot.py (단타용: 뉴스/테마 반영 + 한글 헤드라인 + 근거 문장 + 모바일 메시지)
 # -*- coding: utf-8 -*-
 
 import os, json, sys, traceback
@@ -13,20 +13,25 @@ from oauth2client.service_account import ServiceAccountCredentials
 from gspread.exceptions import WorksheetNotFound, SpreadsheetNotFound, APIError
 
 # 뉴스/테마 엔진
-from news_engine import collect_news, map_theme_to_tickers, format_news_header
+from news_engine import (
+    collect_news,
+    map_theme_to_tickers,
+    format_news_header,
+    build_ticker_reasons,
+)
 
-# ===== 환경값 =====
+# ===== 환경값(기본값은 요청사항 반영) =====
 SHEET_ID_OR_URL = os.getenv("SHEET_ID", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-MAX_PRICE = int(os.getenv("MAX_PRICE", "150000"))                 # 종가 ≤ 15만원
-TOP_N = int(os.getenv("TOP_N", "200"))                            # 시총 상위 N
-MIN_TRADING_VALUE = int(os.getenv("MIN_TRADING_VALUE", "5000000000"))  # 20일 평균 거래대금 하한(50억)
+MAX_PRICE = int(os.getenv("MAX_PRICE", "300000"))                # 종가 ≤ 30만원
+TOP_N = int(os.getenv("TOP_N", "500"))                           # 시총 상위 500
+MIN_TRADING_VALUE = int(os.getenv("MIN_TRADING_VALUE", "5000000000"))  # 20일 평균 거래대금 ≥ 50억
 ATR_N = int(os.getenv("ATR_N", "20"))
 EMA_N = int(os.getenv("EMA_N", "20"))
-PRICE_BONUS = int(os.getenv("PRICE_BONUS", "100000"))             # 10만원 이하 가점
-DAY_TARGET_PCT = float(os.getenv("DAY_TARGET_PCT", "3.0"))        # 일 목표 수익률(%) 기본 3%
+PRICE_BONUS = int(os.getenv("PRICE_BONUS", "100000"))            # 10만원 이하 가점
+DAY_TARGET_PCT = float(os.getenv("DAY_TARGET_PCT", "3.0"))       # 일 목표 수익률(%) 기본 3%
 
 # ===== 시트명/헤더 =====
 SHEET_UNIVERSE = "universe"
@@ -63,19 +68,28 @@ def _fmt_won(x) -> str:
     except Exception:
         return str(x)
 
-def make_top10_mobile_message(out: pd.DataFrame, ref_date: date, target_pct: float) -> str:
-    """모바일에서 보기 좋은 카드형 리스트 메시지 (3% 기본 목표 포함)"""
+def _name_map_from_rows(rows: list[dict]) -> dict[str, str]:
+    mp = {}
+    for r in rows:
+        mp[str(r["ticker"])] = str(r["name"])
+    return mp
+
+def make_top10_mobile_message(out: pd.DataFrame, ref_date: date, target_pct: float, reasons: dict[str, list[str]] | None = None) -> str:
+    """모바일에서 보기 좋은 카드형 리스트 메시지 (한글/목표가/근거 1줄 포함)"""
     header = f"📊 KOSPI 단타 후보 Top10 ( {ref_date.strftime('%Y-%m-%d')} )"
     lines = [header, ""]
     for _, r in out.iterrows():
         rank = int(r["rank"])
         name = str(r["name"])
+        ticker = str(r["ticker"])
         close = _fmt_won(r["close"])
         buy_atr = str(r["buy_atr"])
         sell_atr = str(r["sell_atr"])
         stop = _fmt_won(r["stop"])
         tgt = _fmt_won(r["target_3pct"])
         lines.append(f"{_rank_emoji(rank)} {name} ({close})")
+        if reasons and reasons.get(ticker):
+            lines.append(f"근거: {reasons[ticker][0]}")
         lines.append(f"매수 {buy_atr}")
         lines.append(f"매도 {sell_atr} | 목표 +{target_pct:.1f}% → {tgt}")
         lines.append(f"손절 {stop}")
@@ -168,7 +182,7 @@ def build_universe(ref_date: date):
     """KOSPI 시총 상위 + 가격 ≤ MAX_PRICE + 유동성 필터"""
     ymd = ref_date.strftime("%Y%m%d")
     cap = stock.get_market_cap_by_ticker(ymd, market="KOSPI")
-    cap = cap.sort_values("시가총액", ascending=False).head(max(TOP_N*2, 300))
+    cap = cap.sort_values("시가총액", ascending=False).head(max(TOP_N*2, 600))
     cap = cap[cap["종가"] <= MAX_PRICE]
 
     # 유동성(20일 평균 거래대금) 필터
@@ -241,7 +255,7 @@ def calc_levels(tkr: str, ref_date: date):
 
 
 # ===== 시트 업데이트 & 알림 =====
-def write_universe_and_top10(rows: list, ref: date, news: dict):
+def write_universe_and_top10(rows: list, ref: date, news: dict, name_map: dict[str, str], reasons: dict[str, list[str]]):
     log("[STEP] Google Sheets 연결 시작")
     gc = sheet_client()
     sh = open_spreadsheet(gc)
@@ -264,9 +278,9 @@ def write_universe_and_top10(rows: list, ref: date, news: dict):
     top_ws.clear()
     top_ws.update([out.columns.tolist()] + out.values.tolist())
 
-    # 뉴스 헤더 + 모바일 카드 메시지로 발송
-    news_header = format_news_header(news)  # 기사별 영향 종목 포함
-    msg = news_header + "\n\n" + make_top10_mobile_message(out, ref, DAY_TARGET_PCT)
+    # 뉴스 헤더(한글 변환 + 영향 종목 "종목명") + 후보 카드(근거 1줄)
+    news_header = format_news_header(news, name_map=name_map)
+    msg = news_header + "\n\n" + make_top10_mobile_message(out, ref, DAY_TARGET_PCT, reasons=reasons)
     send_telegram(msg)
 
     log("[STEP] write_universe_and_top10 완료")
@@ -351,7 +365,11 @@ def main():
                 # 보수적 가점 (상한 0.4)
                 r["score"] = round(float(r["score"]) + min(0.4, 0.2 * (b ** 0.5)), 4)
 
-        write_universe_and_top10(rows, ref, news)
+        # 종목코드→이름 맵 + 종목별 '근거' 생성
+        name_map = _name_map_from_rows(rows)
+        reasons = build_ticker_reasons(news, name_map)
+
+        write_universe_and_top10(rows, ref, news, name_map, reasons)
         check_positions_and_alert(ref)
 
         log("[SUCCESS] 작업 완료")
