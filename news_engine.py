@@ -1,4 +1,4 @@
-# news_engine.py (공식 RSS 기반 뉴스/테마/티커 매핑)
+# news_engine.py (공식 RSS 기반 뉴스/테마/티커 매핑 + 한글 변환 + 근거 생성)
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -55,6 +55,29 @@ THEME_MAP = {
         "tickers": ["009540","010140","011200","011930","086280"]
     },
 }
+
+# --- 간단 한글 변환(영어 핵심 용어 치환) ---
+_EN2KO = {
+    "fed": "연준", "federal reserve": "연준", "rate": "금리", "rates": "금리", "hike": "인상", "cut": "인하",
+    "inflation": "물가", "cpi": "소비자물가", "ppi": "생산자물가", "jobs": "고용", "payrolls": "비농업고용",
+    "recession": "경기침체", "soft landing": "연착륙", "oil": "유가", "brent": "브렌트유", "wti": "WTI",
+    "chip": "칩", "chips": "칩", "semiconductor": "반도체", "ai": "AI", "gpu": "GPU",
+    "ceasefire": "휴전", "sanction": "제재", "sanctions": "제재", "geopolitics": "지정학",
+    "earnings": "실적", "guidance": "가이던스", "outlook": "전망",
+    "bond": "채권", "yields": "금리", "yield": "금리", "dollar": "달러", "currency": "환율",
+    "china": "중국", "taiwan": "대만", "ukraine": "우크라이나", "israel": "이스라엘", "gaza": "가자지구",
+}
+
+def _to_korean_headline(title: str) -> str:
+    t = title
+    low = t.lower()
+    for en, ko in _EN2KO.items():
+        if en in low:
+            t = t.replace(en, ko).replace(en.title(), ko).replace(en.upper(), ko)
+    return (t[:120] + "…") if len(t) > 120 else t
+
+def _short_time(dt) -> str:
+    return dt.strftime("%H:%M")
 
 def load_sources(path: str="news_sources.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -151,17 +174,35 @@ def map_theme_to_tickers(theme_score: dict) -> dict[str, float]:
             ticker_score[tkr] = ticker_score.get(tkr, 0.0) + s
     return ticker_score
 
-def format_news_header(news: dict) -> str:
-    """모바일 최적화 헤더: 기사별 영향 종목도 같이 노출"""
+def format_news_header(news: dict, name_map: dict[str, str] | None = None) -> str:
+    """모바일 최적화 헤더: 기사별 영향 종목(종목명) + 한글화된 제목"""
     lines = []
     lines.append("🌅 아침 시황/뉴스 (전일 15:30 ~ 오늘 08:30)")
     for it in news["highlights"]:
-        ts = it["published"].strftime("%H:%M")
-        impacted = ", ".join(it["tickers"][:3]) if it["tickers"] else "—"
-        lines.append(f"- [{ts}] {it['title']} ({it['source']}) → 영향: {impacted}")
+        ts = _short_time(it["published"])
+        title_ko = _to_korean_headline(it["title"])
+        impacted = it["tickers"][:3] if it["tickers"] else []
+        if name_map and impacted:
+            impacted = [name_map.get(t, t) for t in impacted]
+        impacted_str = ", ".join(impacted) if impacted else "—"
+        lines.append(f"- [{ts}] {title_ko} ({it['source']}) → 영향: {impacted_str}")
     if news["theme_score"]:
         hot = sorted(news["theme_score"].items(), key=lambda x: x[1], reverse=True)[:3]
         if hot:
             lines.append("")
             lines.append("🔥 강한 테마: " + ", ".join([f"{k}" for k,_ in hot]))
     return "\n".join(lines)
+
+def build_ticker_reasons(news: dict, name_map: dict[str, str]) -> dict[str, list[str]]:
+    """각 티커별로 관련 뉴스 1~2줄 근거 생성."""
+    reasons: dict[str, list[str]] = {}
+    for it in news["highlights"]:
+        title_ko = _to_korean_headline(it["title"])
+        ts = _short_time(it["published"])
+        src = it["source"]
+        for tk in it.get("tickers", []):
+            line = f"[{ts}] {title_ko} ({src})"
+            arr = reasons.setdefault(tk, [])
+            if len(arr) < 2:
+                arr.append(line)
+    return reasons
